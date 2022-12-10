@@ -1,0 +1,366 @@
+blueprint:
+  name: Automatisation of heat controll
+  domain: automation
+  input:
+    climate_target:
+      name: Thermostat
+      description: Thermostat to be controlled
+      selector:
+        entity:
+          domain: climate
+    t_current_target:
+      name: T_curr
+      description: Current temperature in room.
+      selector:
+        entity:
+          domain: sensor
+    climate_trigger_t_above:
+      name: Flag T > T_goal
+      description: Flag, it the temperature T above T_goal
+      selector:
+        entity:
+          domain: binary_sensor
+    climate_trigger_t_below:
+      name: Flag T < T_goal - T_delta
+      description: Flag, it the temperature T below T_goal - T_delta
+      selector:
+        entity:
+          domain: binary_sensor
+    open_close_target:
+      name: Door | Window - group
+      description: Group of sensors for switching off the climate in "on"-state
+      selector:
+        entity:
+          domain: group
+    climate_auto_control_target:
+      name: Manual switch for climate 
+      description: Flag for activating / deactivating of climate control
+      selector:
+        entity:
+          domain: input_boolean
+    climate_reset_heating_control_target:
+      name: Manual switch for reset of temperature 
+      description: Reset T_goal to T_min after reaching T_goal
+      selector:
+        entity:
+          domain: input_boolean
+    t_min_target:
+      name: T_min
+      description: Minimal temperature is after reset of temperature in (heating once) mode.
+      default: 17
+      selector:
+        number:
+          min: 10.0
+          max: 30.0
+          step: 0.5
+          unit_of_measurement: °C
+    t_delta_target:
+      name: T_delta
+      description: Maximal deviation of target temperature. T_low = T_goal - T_delta
+      default: input_number.system_delta_goal_t
+      selector:
+        entity:
+          domain: input_number
+mode: restart
+
+variables:
+  climate_target: !input climate_target
+  t_current_target: !input t_current_target
+  open_close_target: !input open_close_target
+  climate_auto_control_target: !input climate_auto_control_target
+  climate_reset_heating_control_target: !input climate_reset_heating_control_target
+  climate_trigger_t_above: !input climate_trigger_t_above
+  climate_trigger_t_below: !input climate_trigger_t_below
+
+  t_min_target: !input t_min_target
+  t_delta_target: !input t_delta_target
+  t_goal: "{{state_attr(climate_target, 'temperature') | float}}"
+  t_current: "{{states[t_current_target].state | float}}"
+  t_delta: "{{states[t_delta_target].state | float}}"
+  
+  debug_mode: 'off'
+  
+trigger:
+  - platform: state
+    entity_id: !input open_close_target
+    for: 00:00:45
+  - platform: state
+    entity_id: !input climate_target
+    to: auto
+  - platform: state
+    entity_id: !input climate_auto_control_target
+  - platform: state
+    entity_id: !input climate_trigger_t_above
+    to: 'on'
+    from: 'off'
+  - platform: state
+    entity_id: !input climate_trigger_t_below
+    to: 'on'
+    from: 'off'
+  - platform: state
+    entity_id: !input climate_target
+    to: heat
+    from: 'on'
+
+condition: []
+
+action:
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: "{{ debug_mode  == 'on' }}"
+      sequence:
+      - service: notify.debugger_file
+        data:
+          message: |-
+            ####
+            Start of automation: {{now().strftime('%Y-%m-%d %H:%M:%S')}}
+            from_state: {{ trigger.from_state.state }}
+            to_state: {{ trigger.to_state.state }}
+            entity_id: {{ trigger.from_state.entity_id }}
+            climate_target: {{climate_target }}
+            t_delta_target: {{t_delta_target }}
+            t_current_target: {{t_current_target }}
+            t_current: {{t_current }}
+            open_close_target: {{open_close_target }}
+            climate_auto_control_target: {{climate_auto_control_target }}
+            climate_trigger_t_above: {{climate_trigger_t_above}}
+            climate_trigger_t_below: {{climate_trigger_t_below}}
+            t_min_target: {{t_min_target }}
+            climate_reset_heating_control_target: {{climate_reset_heating_control_target }}
+            t_goal: {{t_goal}}
+            t_delta: {{t_delta + 1.0}}
+            ####
+    default: []
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ trigger.from_state.entity_id  == open_close_target}}'
+      sequence:
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: "{{ debug_mode  == 'on' }}"
+          sequence:
+          - service: notify.debugger_file
+            data:
+              message: Called by door group
+        default: []      
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input open_close_target
+            state: 'on'
+          sequence:
+          # door/window open -> check hold_temperature
+          - choose:
+            - conditions:
+              - condition: state
+                entity_id: !input climate_auto_control_target
+                state: 'on'
+              sequence:
+              #  hold_temperature on -> turn off hold_temperature
+              - service: input_boolean.turn_off
+                data: {}
+                entity_id: !input climate_auto_control_target
+            default:
+            # hold_temperature off -> check climate on
+            - choose:
+              - conditions:
+                - condition: not
+                  conditions:
+                  - condition: state
+                    entity_id: !input climate_target
+                    state: 'off'
+                sequence:
+                #  climate on -> turn off
+                - service: climate.turn_off
+                  data: {}
+                  entity_id: !input climate_target
+              default: [] #climate already off -> continue
+        default:
+        # door/window closed -> check hold_temperature
+        - choose:
+          - conditions:
+            - condition: state
+              entity_id: !input climate_auto_control_target
+              state: 'off'
+            sequence:
+            # hold_temperature off -> turn hold_temperature on
+            - service: input_boolean.turn_on
+              data: {}
+              entity_id: !input climate_auto_control_target
+          default: [] # hold_temperature on -> continue
+    - conditions:
+      - condition: template
+        value_template: '{{ trigger.from_state.entity_id  == climate_auto_control_target}}'
+      sequence:
+      #  Called by hold_temperature
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_auto_control_target
+            state: 'off'
+          sequence:
+          #  hold_temperature on to off -> check climate on
+          - choose:
+            - conditions:
+              - condition: not
+                conditions:
+                - condition: state
+                  entity_id: !input climate_target
+                  state: 'off'
+              sequence:
+              #  climate on -> turn off
+              - service: climate.turn_off
+                data: {}
+                entity_id: !input climate_target
+            default: [] #  climate off -> continue
+        default:
+        #  hold_temperature off to on -> check if t < goal
+        - choose:
+          - conditions:
+            - condition: template
+              value_template: '{{ t_current  < t_goal }}'
+            sequence:
+            #  t < goal is true -> check if heat on
+            - choose:
+              - conditions:
+                - condition: state
+                  entity_id: !input climate_target
+                  state: 'off'
+                sequence:
+                #  climate off -> turn climate to heat mode
+                - service: climate.set_hvac_mode
+                  data:
+                    hvac_mode: heat
+                  entity_id: !input climate_target
+              default: [] # climate already on -> continue
+          default: [] # t < goal is false -> continue
+    - conditions:
+      - condition: or
+        conditions:
+        - condition: and
+          conditions:
+          - condition: template
+            value_template: '{{ trigger.from_state.entity_id  == climate_target}}'
+          - condition: template
+            value_template: '{{ trigger.to_state.state  == trigger.from_state.state}}'
+        - condition: and
+          conditions:
+          - condition: template
+            value_template: '{{ trigger.from_state.entity_id  == t_current_target}}'
+          - condition: template
+            value_template: '{{ trigger.to_state.state  != trigger.from_state.state}}'
+        - condition: and
+          conditions:
+          - condition: template
+            value_template: '{{ trigger.from_state.entity_id  == climate_trigger_t_above}}'
+          - condition: template
+            value_template: '{{ trigger.to_state.state  != trigger.from_state.state}}'
+        - condition: and
+          conditions:
+          - condition: template
+            value_template: '{{ trigger.from_state.entity_id  == climate_trigger_t_below}}'
+          - condition: template
+            value_template: '{{ trigger.to_state.state  != trigger.from_state.state}}'
+      sequence:
+      # 'Called by climate temperature or sensor: check hold_temperature on'
+      - choose:
+        - conditions:
+          - condition: or
+            conditions:
+            - condition: and
+              conditions:
+              - condition: template
+                value_template: '{{ trigger.from_state.entity_id  == climate_target}}'
+              - condition: template
+                value_template: '{{ trigger.to_state.state  == trigger.from_state.state}}'
+              - condition: template
+                value_template: '{{ t_current  < t_goal }}'
+            - condition: and
+              conditions:
+              - condition: template
+                value_template: '{{ trigger.from_state.entity_id  != climate_target}}'
+              - condition: template
+                value_template: '{{ trigger.to_state.state  != trigger.from_state.state}}'
+              - condition: template
+                value_template: '{{ t_current  < t_goal - t_delta }}'
+          sequence:
+          #  T < goal - d for sensor or T < goal for climate is true -> check if heat on
+          - choose:
+            - conditions:
+              - condition: state
+                entity_id: !input climate_target
+                state: 'off'
+              sequence:
+              #  climate off -> turn climate to heat
+              - service: climate.set_hvac_mode
+                data:
+                  hvac_mode: heat
+                entity_id: !input climate_target
+            default: [] #  climate already on -> continue
+        - conditions:
+          - condition: template
+            value_template: '{{ t_current > t_goal  }}'
+          sequence:
+          #  '"T > goal is true -> turn off climate,  check if heat-once"'
+          - choose:
+            - conditions:
+              - condition: state
+                entity_id: !input climate_reset_heating_control_target
+                state: 'on'
+              sequence:
+              #  heat once is true -> set T_min, reset heat once
+              - service: input_boolean.turn_off
+                data: {}
+                entity_id: !input climate_reset_heating_control_target
+              - service: climate.set_temperature
+                data:
+                  temperature: '{{t_min_target }}'
+                entity_id: !input climate_target
+            default: [] #  heat once is off -> continue
+          - service: climate.turn_off
+            data: {}
+            entity_id: !input climate_target            
+        default: [] #  Tgoal - d <= T <= Tgoal by sensor -> continue
+    - conditions:
+      - condition: and
+        conditions:
+        - condition: template
+          value_template: '{{ trigger.from_state.entity_id  == climate_target}}'
+        - condition: template
+          value_template: '{{ trigger.to_state.state  != trigger.from_state.state}}'
+      sequence:
+      #  Called by climate state
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_target
+            state: auto
+          sequence:
+          #  '"climate auto -> auto to heat"'
+          - service: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            entity_id: !input climate_target
+        - conditions:
+          - condition: state
+            entity_id: !input climate_target
+            state: heat
+          sequence:
+          #  climate to heat -> check if hold_temperature is on
+          - choose:
+            - conditions:
+              - condition: state
+                entity_id: !input climate_auto_control_target
+                state: 'off'
+              sequence:
+              # 'by climate on to heat: hold_temperature off -> turn on'
+              - service: input_boolean.turn_on
+                data: {}
+                entity_id: !input climate_auto_control_target
+            default: [] #  'by climate on to heat: hold_temperature on -> continue'
+        default: []  #  climate not auto and not to heat -> just continue
+    default: []  #  Unknown trigger case
+    #  '#### End of automation ####'
